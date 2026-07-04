@@ -58,7 +58,7 @@ export async function findAccountByAccountId(accountId: string): Promise<{ merch
 // Save (upsert) a merchant's keys. Validates them against Razorpay
 // first, fetches the account_id, and generates a webhook_secret.
 export async function savePaymentAccount(merchantId: number, keyId: string, keySecret: string):
-  Promise<{ ok: true; account_id: string | null; webhook_secret: string } | { ok: false; error: string }> {
+  Promise<{ ok: boolean; error?: string; account_id?: string | null; webhook_secret?: string }> {
   // Validate by hitting a harmless authenticated endpoint
   let accountId: string | null = null;
   try {

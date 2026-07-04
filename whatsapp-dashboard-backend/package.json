@@ -1,11 +1,17 @@
 {
   "name": "whatsapp-dashboard-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Whatszorder — WhatsApp order SaaS backend",
+  "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn ./src/server.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "migrate:v2": "ts-node src/migrate_v2.ts",
+    "migrate:v3": "ts-node src/migrate_v3.ts"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "keywords": [],
   "author": "",
@@ -16,15 +22,16 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "jsonwebtoken": "^9.0.3",
+    "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.22.5",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
-    "@types/jsonwebtoken": "^9.0.10",
+    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^26.0.1",
+    "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^6.0.3"
   }
