@@ -303,6 +303,23 @@ app.use('/api', requireAuth);
 // ─────────────────────────────────────────────────────────────
 // FRONTEND API — merchant-scoped
 // ─────────────────────────────────────────────────────────────
+// Who am I + which WhatsApp number is mine (drives header & Settings)
+app.get('/api/me', async (req: AuthedRequest, res: Response) => {
+  try {
+    const [m]: any = await pool.query(
+      'SELECT id, business_name, login_phone FROM merchants WHERE id = ?', [req.merchantId]
+    );
+    const channel = await channelByMerchantId(req.merchantId!);
+    res.json({
+      merchant: m[0] || null,
+      channel: channel ? { display_number: channel.display_number, status: 'active' } : null,
+    });
+  } catch (e) {
+    console.error('Error fetching profile:', e);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
 app.get('/api/customers', async (req: AuthedRequest, res: Response) => {
   try {
     const [customers]: any = await pool.query(
