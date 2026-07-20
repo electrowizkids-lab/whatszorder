@@ -55,12 +55,17 @@ export function sendText(channel: Channel, to: string, text: string) {
   return post(channel, { to, type: 'text', text: { preview_url: false, body: text } });
 }
 
-// ── Interactive LIST (the product catalog) ──────────────────
-// WhatsApp limits: max 10 rows, title ≤ 24 chars, description ≤ 72.
+// ── Interactive LIST with SECTIONS (grouped catalog) ────────
+// WhatsApp limits: ≤10 sections, ≤10 rows TOTAL, titles ≤24 chars,
+// row descriptions ≤72 chars. Callers enforce the 10-row total.
+export type ListSection = {
+  title: string;
+  rows: { id: string; title: string; description?: string }[];
+};
+
 export function sendList(
   channel: Channel, to: string,
-  opts: { header: string; body: string; buttonLabel: string;
-          rows: { id: string; title: string; description?: string }[] }
+  opts: { header: string; body: string; buttonLabel: string; sections: ListSection[] }
 ) {
   return post(channel, {
     to,
@@ -72,16 +77,29 @@ export function sendList(
       footer: { text: 'Whatszorder' },
       action: {
         button: opts.buttonLabel.slice(0, 20),
-        sections: [{
-          title: 'Catalog',
-          rows: opts.rows.slice(0, 10).map(r => ({
+        sections: opts.sections.slice(0, 10).map(s => ({
+          title: s.title.slice(0, 24),
+          rows: s.rows.map(r => ({
             id: r.id,
             title: r.title.slice(0, 24),
             description: (r.description || '').slice(0, 72),
           })),
-        }],
+        })),
       },
     },
+  });
+}
+
+// ── IMAGE message (product photo with caption) ──────────────
+// `link` must be a public HTTPS URL WhatsApp's servers can fetch.
+export function sendImage(
+  channel: Channel, to: string,
+  opts: { link: string; caption?: string }
+) {
+  return post(channel, {
+    to,
+    type: 'image',
+    image: { link: opts.link, caption: (opts.caption || '').slice(0, 1024) },
   });
 }
 

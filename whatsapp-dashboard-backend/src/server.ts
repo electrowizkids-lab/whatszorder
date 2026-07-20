@@ -468,7 +468,7 @@ app.patch('/api/orders/:id/status', async (req: AuthedRequest, res: Response) =>
 app.get('/api/products', async (req: AuthedRequest, res: Response) => {
   try {
     const [rows]: any = await pool.query(
-      'SELECT id, name, unit, price, active, sort_order FROM products WHERE merchant_id = ? ORDER BY sort_order, id',
+      'SELECT id, parent_id, name, unit, price, image_url, active, sort_order FROM products WHERE merchant_id = ? ORDER BY sort_order, id',
       [req.merchantId]
     );
     res.json(rows);
@@ -479,17 +479,29 @@ app.get('/api/products', async (req: AuthedRequest, res: Response) => {
 });
 
 app.post('/api/products', async (req: AuthedRequest, res: Response) => {
-  const { name, unit, price } = req.body;
+  const { name, unit, price, parent_id, image_url } = req.body;
   if (!name?.trim() || price === undefined || isNaN(Number(price))) {
     return res.status(400).json({ error: 'Name and a numeric price are required.' });
   }
   try {
+    // A sub-product must belong to one of this merchant's top-level items.
+    let parentId: number | null = null;
+    if (parent_id) {
+      const [par]: any = await pool.query(
+        'SELECT id FROM products WHERE id = ? AND merchant_id = ? AND parent_id IS NULL',
+        [parent_id, req.merchantId]
+      );
+      if (!par.length) return res.status(400).json({ error: 'Invalid parent product.' });
+      parentId = par[0].id;
+    }
+    // Sort within the sibling group (top-level or inside the parent).
     const [mx]: any = await pool.query(
-      'SELECT COALESCE(MAX(sort_order), 0) AS mx FROM products WHERE merchant_id = ?', [req.merchantId]
+      'SELECT COALESCE(MAX(sort_order), 0) AS mx FROM products WHERE merchant_id = ? AND ((? IS NULL AND parent_id IS NULL) OR parent_id = ?)',
+      [req.merchantId, parentId, parentId]
     );
     const [result]: any = await pool.query(
-      'INSERT INTO products (merchant_id, name, unit, price, sort_order) VALUES (?, ?, ?, ?, ?)',
-      [req.merchantId, name.trim().slice(0, 120), (unit || 'pc').trim().slice(0, 30), Number(price), mx[0].mx + 1]
+      'INSERT INTO products (merchant_id, parent_id, name, unit, price, image_url, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [req.merchantId, parentId, name.trim().slice(0, 120), (unit || 'pc').trim().slice(0, 30), Number(price), image_url || null, mx[0].mx + 1]
     );
     res.json({ success: true, id: result.insertId });
   } catch (e) {
@@ -499,7 +511,7 @@ app.post('/api/products', async (req: AuthedRequest, res: Response) => {
 });
 
 app.patch('/api/products/:id', async (req: AuthedRequest, res: Response) => {
-  const allowed = ['name', 'unit', 'price', 'active', 'sort_order'];
+  const allowed = ['name', 'unit', 'price', 'active', 'sort_order', 'image_url'];
   const sets: string[] = [];
   const vals: any[] = [];
   for (const f of allowed) {

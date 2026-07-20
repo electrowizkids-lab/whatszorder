@@ -6,7 +6,7 @@
 // Without Razorpay keys, orders confirm exactly as before.
 // ─────────────────────────────────────────────────────────────
 import pool from './db';
-import { Channel, sendText, sendList, sendButtons } from './wa';
+import { Channel, sendText, sendList, sendButtons, sendImage, ListSection } from './wa';
 import { createPaymentLinkForMerchant } from './razorpay';
 
 const GREETING = /^(hi|hii+|hello|hey|namaste|namaskar|menu|order|start|catalog|catalogue)\b/i;
@@ -51,35 +51,67 @@ async function setState(customerId: number, state: string, data: BotState) {
 
 // ── pieces of the flow ───────────────────────────────────────
 async function sendCatalog(ctx: BotContext, page = 1) {
-  const [products]: any = await pool.query(
-    'SELECT id, name, unit, price FROM products WHERE merchant_id = ? AND active = 1 ORDER BY sort_order, id',
+  const [rows]: any = await pool.query(
+    `SELECT id, parent_id, name, unit, price FROM products
+     WHERE merchant_id = ? AND active = 1
+     ORDER BY sort_order, id`,
     [ctx.merchantId]
   );
-  if (products.length === 0) {
+  if (rows.length === 0) {
     const msg = 'Our catalog is being set up. Please check back soon!';
     const wamid = await sendText(ctx.channel, ctx.customerPhone, msg);
     await ctx.logOutbound(msg, wamid);
     return;
   }
-  const PER_PAGE = 9; // 10-row WhatsApp limit, minus one nav row
-  const totalPages = Math.max(1, Math.ceil(products.length / PER_PAGE));
-  const p = Math.min(Math.max(1, page), totalPages);
-  const slice = products.slice((p - 1) * PER_PAGE, p * PER_PAGE);
 
-  const rows = slice.map((pr: any) => ({
-    id: `prod_${pr.id}`,
-    title: pr.name,
-    description: `₹${Number(pr.price).toFixed(0)} per ${pr.unit}`,
-  }));
+  // Groups become WhatsApp sections: parent name = section header,
+  // its sub-products = the tappable rows. Standalone items gather
+  // under a plain "Menu" section. Order mirrors the dashboard.
+  const tops = rows.filter((r: any) => !r.parent_id);
+  const kidsBy: Record<number, any[]> = {};
+  for (const r of rows) if (r.parent_id) (kidsBy[r.parent_id] ||= []).push(r);
+
+  const entries: { section: string; row: { id: string; title: string; description: string } }[] = [];
+  for (const t of tops) {
+    const kids = kidsBy[t.id] || [];
+    if (kids.length) {
+      for (const k of kids) {
+        entries.push({
+          section: t.name,
+          row: { id: `prod_${k.id}`, title: k.name, description: `₹${Number(k.price).toFixed(0)} per ${k.unit}` },
+        });
+      }
+    } else {
+      entries.push({
+        section: 'Menu',
+        row: { id: `prod_${t.id}`, title: t.name, description: `₹${Number(t.price).toFixed(0)} per ${t.unit}` },
+      });
+    }
+  }
+
+  const PER_PAGE = 9; // 10-row WhatsApp limit, minus one nav row
+  const totalPages = Math.max(1, Math.ceil(entries.length / PER_PAGE));
+  const p = Math.min(Math.max(1, page), totalPages);
+  const slice = entries.slice((p - 1) * PER_PAGE, p * PER_PAGE);
+
+  // Rebuild sections from the page's consecutive groups
+  const sections: ListSection[] = [];
+  for (const e of slice) {
+    const last = sections[sections.length - 1];
+    if (!last || last.title !== e.section) sections.push({ title: e.section, rows: [] });
+    sections[sections.length - 1].rows.push(e.row);
+  }
   if (p < totalPages) {
-    rows.push({ id: `page_${p + 1}`, title: '➡️ More items', description: `Page ${p + 1} of ${totalPages}` });
+    sections[sections.length - 1].rows.push({
+      id: `page_${p + 1}`, title: '➡️ More items', description: `Page ${p + 1} of ${totalPages}`,
+    });
   }
 
   const wamid = await sendList(ctx.channel, ctx.customerPhone, {
     header: totalPages > 1 ? `Our Products 🛒 (${p}/${totalPages})` : 'Our Products 🛒',
     body: 'Tap the button below, pick an item, and we will ask the quantity.',
     buttonLabel: 'View products',
-    rows,
+    sections,
   });
   await ctx.logOutbound(`[Sent product catalog${totalPages > 1 ? ` p${p}/${totalPages}` : ''}]`, wamid);
 }
@@ -171,7 +203,11 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
       if (rowId.startsWith('prod_')) {
         const productId = Number(rowId.slice(5));
         const [rows]: any = await pool.query(
-          'SELECT id, name, unit, price FROM products WHERE id = ? AND merchant_id = ? AND active = 1',
+          `SELECT p.id, p.name, p.unit, p.price, p.image_url,
+                  par.name AS parent_name, par.image_url AS parent_image
+           FROM products p
+           LEFT JOIN products par ON par.id = p.parent_id
+           WHERE p.id = ? AND p.merchant_id = ? AND p.active = 1`,
           [productId, ctx.merchantId]
         );
         if (rows.length === 0) {
@@ -181,9 +217,25 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
           return true;
         }
         const p = rows[0];
-        data.pending = { product_id: p.id, name: p.name, unit: p.unit, price: Number(p.price) };
+        const fullName = p.parent_name ? `${p.parent_name} — ${p.name}` : p.name;
+        const photo = p.image_url || p.parent_image;
+
+        // Show the customer what they picked (photo + price), then ask quantity.
+        if (photo) {
+          try {
+            const imgWamid = await sendImage(ctx.channel, ctx.customerPhone, {
+              link: photo,
+              caption: `${fullName}\n₹${Number(p.price).toFixed(0)} per ${p.unit}`,
+            });
+            await ctx.logOutbound(`[Photo] ${fullName}`, imgWamid);
+          } catch (imgErr: any) {
+            console.error('❌ Product photo failed:', imgErr.message); // continue without it
+          }
+        }
+
+        data.pending = { product_id: p.id, name: fullName, unit: p.unit, price: Number(p.price) };
         await setState(ctx.customerId, 'QTY_WAIT', data);
-        const ask = `How many *${p.unit}* of *${p.name}* would you like? Reply with a number (e.g. 2).`;
+        const ask = `How many *${p.unit}* of *${fullName}* would you like? Reply with a number (e.g. 2).`;
         const wamid = await sendText(ctx.channel, ctx.customerPhone, ask);
         await ctx.logOutbound(ask, wamid);
         return true;
