@@ -187,7 +187,7 @@ async function createOrder(ctx: BotContext, data: BotState) {
 
   let confirmText: string;
   if (link) {
-    await pool.query('UPDATE orders SET rzp_link_id = ? WHERE id = ?', [link.id, orderId]); // column reused for the Stripe session id
+    await pool.query('UPDATE orders SET payment_ref = ? WHERE id = ?', [link.id, orderId]);
     confirmText =
       `\ud83e\uddfe *Order ${orderNo}*\n\n` +
       receipt(data.cart, 'TO PAY') +

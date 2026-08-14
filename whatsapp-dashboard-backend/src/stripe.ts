@@ -26,7 +26,9 @@ export type StripeCreds = {
 const SUCCESS_URL = process.env.STRIPE_SUCCESS_URL || 'https://yanvio.com';
 
 function client(secretKey: string) {
-  return new Stripe(secretKey, { apiVersion: '2024-06-20' as any });
+  // No apiVersion pin — the SDK follows the account's own default,
+  // so this never goes stale as Stripe moves forward.
+  return new Stripe(secretKey);
 }
 
 // ── account lookups ──────────────────────────────────────────
@@ -127,7 +129,7 @@ export function verifyStripeEvent(
   if (!rawBody || !signature || !webhookSecret) return null;
   try {
     // constructEvent only needs the secret for HMAC; any key works here
-    const s = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder', { apiVersion: '2024-06-20' as any });
+    const s = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder');
     return s.webhooks.constructEvent(rawBody, signature, webhookSecret);
   } catch (e: any) {
     console.warn('🚫 Stripe signature check failed:', e?.message);
