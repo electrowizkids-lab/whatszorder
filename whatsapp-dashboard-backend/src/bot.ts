@@ -7,7 +7,7 @@
 // ─────────────────────────────────────────────────────────────
 import pool from './db';
 import { Channel, sendText, sendList, sendButtons, sendImage, ListSection } from './wa';
-import { createPaymentLinkForMerchant } from './razorpay';
+import { createCheckoutForMerchant } from './stripe';
 
 const GREETING = /^(hi|hii+|hello|hey|namaste|namaskar|menu|order|start|catalog|catalogue)\b/i;
 
@@ -78,13 +78,13 @@ async function sendCatalog(ctx: BotContext, page = 1) {
       for (const k of kids) {
         entries.push({
           section: t.name,
-          row: { id: `prod_${k.id}`, title: k.name, description: `₹${Number(k.price).toFixed(0)} per ${k.unit}` },
+          row: { id: `prod_${k.id}`, title: k.name, description: `${money(k.price)} \u00B7 ${k.unit}` },
         });
       }
     } else {
       entries.push({
         section: 'Menu',
-        row: { id: `prod_${t.id}`, title: t.name, description: `₹${Number(t.price).toFixed(0)} per ${t.unit}` },
+        row: { id: `prod_${t.id}`, title: t.name, description: `${money(t.price)} \u00B7 ${t.unit}` },
       });
     }
   }
@@ -109,28 +109,54 @@ async function sendCatalog(ctx: BotContext, page = 1) {
 
   const wamid = await sendList(ctx.channel, ctx.customerPhone, {
     header: totalPages > 1 ? `Our Products 🛒 (${p}/${totalPages})` : 'Our Products 🛒',
-    body: 'Tap the button below, pick an item, and we will ask the quantity.',
+    body: 'Tap *View products* below, choose what you need, and we\u2019ll ask how many.',
     buttonLabel: 'View products',
     sections,
   });
   await ctx.logOutbound(`[Sent product catalog${totalPages > 1 ? ` p${p}/${totalPages}` : ''}]`, wamid);
 }
 
-function cartLines(cart: CartItem[]) {
-  return cart.map(c => `• ${c.name} — ${c.qty} × ₹${c.price.toFixed(0)} = ₹${(c.qty * c.price).toFixed(0)}`).join('\n');
-}
+// ── money + receipt formatting ─────────────────────────────
+// WhatsApp renders text between triple backticks in a monospace
+// font, which lets us align prices into a real receipt column.
+const money = (n: number) => '\u00A3' + Number(n || 0).toFixed(2);
+
 function cartTotal(cart: CartItem[]) {
   return cart.reduce((s, c) => s + c.qty * c.price, 0);
 }
 
+const W = 30; // safe monospace width on a phone
+
+function padRow(label: string, amount: string) {
+  const room = W - amount.length - 1;
+  const lbl = label.length > room ? label.slice(0, room - 1) + '.' : label;
+  return lbl + ' '.repeat(Math.max(1, W - lbl.length - amount.length)) + amount;
+}
+
+// A monospace receipt block: aligned item lines, rule, total.
+function receipt(cart: CartItem[], totalLabel = 'TOTAL') {
+  const rows = cart.map(c => padRow(`${c.qty} x ${c.name}`, money(c.qty * c.price)));
+  const rule = '-'.repeat(W);
+  const tot = padRow(totalLabel, money(cartTotal(cart)));
+  return '```' + rows.join('\n') + '\n' + rule + '\n' + tot + '```';
+}
+
+// Plain one-line summary for the dashboard chat log
+function cartLines(cart: CartItem[]) {
+  return cart.map(c => `${c.qty} x ${c.name} ${money(c.qty * c.price)}`).join(', ');
+}
+
 async function sendCartReview(ctx: BotContext, data: BotState) {
-  const body = `🧺 *Your cart*\n${cartLines(data.cart)}\n\n*Total: ₹${cartTotal(data.cart).toFixed(0)}*\n\nWhat would you like to do?`;
+  const body =
+    `\ud83e\uddfa *Your basket*\n\n` +
+    receipt(data.cart) +
+    `\n\nReady to place the order?`;
   const wamid = await sendButtons(ctx.channel, ctx.customerPhone, body, [
     { id: 'cart_add', title: 'Add more' },
-    { id: 'cart_confirm', title: 'Confirm ✅' },
-    { id: 'cart_cancel', title: 'Cancel ❌' },
+    { id: 'cart_confirm', title: 'Place order' },
+    { id: 'cart_cancel', title: 'Cancel' },
   ]);
-  await ctx.logOutbound(`[Cart review] Total ₹${cartTotal(data.cart).toFixed(0)}`, wamid);
+  await ctx.logOutbound(`[Basket] ${cartLines(data.cart)} - total ${money(cartTotal(data.cart))}`, wamid);
 }
 
 async function createOrder(ctx: BotContext, data: BotState) {
@@ -153,21 +179,25 @@ async function createOrder(ctx: BotContext, data: BotState) {
   }
 
   // ── Payment link (Razorpay) — sent when keys are configured ──
-  const link = await createPaymentLinkForMerchant(ctx.merchantId, {
-    orderNo, orderId, amount: total,
-    customerName: ctx.customerName,
+  const link = await createCheckoutForMerchant(ctx.merchantId, {
+    orderNo, orderId,
+    items: data.cart.map(c => ({ name: c.name, qty: c.qty, price: c.price })),
     customerPhone: ctx.customerPhone,
-    description: `Order ${orderNo}`,
   });
 
   let confirmText: string;
   if (link) {
-    await pool.query('UPDATE orders SET rzp_link_id = ? WHERE id = ?', [link.id, orderId]);
+    await pool.query('UPDATE orders SET rzp_link_id = ? WHERE id = ?', [link.id, orderId]); // column reused for the Stripe session id
     confirmText =
-      `🧾 *Order created!*\n\nOrder no: *${orderNo}*\n${cartLines(data.cart)}\n\n*Total: ₹${total.toFixed(0)}*\n\n💳 *Pay securely here:*\n${link.short_url}\n\nYour order will be confirmed as soon as payment completes. 🙏`;
+      `\ud83e\uddfe *Order ${orderNo}*\n\n` +
+      receipt(data.cart, 'TO PAY') +
+      `\n\n\ud83d\udcb3 *Pay securely here*\n${link.url}\n\n` +
+      `Your order is confirmed the moment payment clears.`;
   } else {
     confirmText =
-      `✅ *Order confirmed!*\n\nOrder no: *${orderNo}*\n${cartLines(data.cart)}\n\n*Total: ₹${total.toFixed(0)}*\n\nWe will update you as it is processed. Thank you! 🙏`;
+      `\u2705 *Order confirmed*\n\nOrder no: *${orderNo}*\n\n` +
+      receipt(data.cart) +
+      `\n\nWe\u2019ll keep you posted as it\u2019s prepared. Thank you!`;
   }
 
   const wamid = await sendText(ctx.channel, ctx.customerPhone, confirmText);
@@ -177,11 +207,11 @@ async function createOrder(ctx: BotContext, data: BotState) {
   ctx.emit('order:new', {
     id: orderId, order_no: orderNo, customer_id: ctx.customerId,
     total_amount: total, status: 'received', payment_status: 'unpaid',
-    payment_link: link?.short_url || null,
+    payment_link: link?.url || null,
     items: data.cart,
   });
 
-  console.log(`🧾 [merchant ${ctx.merchantId}] ORDER ${orderNo} — ₹${total.toFixed(0)} (${data.cart.length} items)${link ? ' + payment link' : ''}`);
+  console.log(`\ud83e\uddfe [merchant ${ctx.merchantId}] ORDER ${orderNo} \u2014 ${money(total)} (${data.cart.length} items)${link ? ' + payment link' : ''}`);
 }
 
 // ── entry point: true = bot handled it, false = ordinary chat ─
@@ -225,7 +255,7 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
           try {
             const imgWamid = await sendImage(ctx.channel, ctx.customerPhone, {
               link: photo,
-              caption: `${fullName}\n₹${Number(p.price).toFixed(0)} per ${p.unit}`,
+              caption: `*${fullName}*\n${money(p.price)} \u00B7 ${p.unit}`,
             });
             await ctx.logOutbound(`[Photo] ${fullName}`, imgWamid);
           } catch (imgErr: any) {
@@ -235,7 +265,9 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
 
         data.pending = { product_id: p.id, name: fullName, unit: p.unit, price: Number(p.price) };
         await setState(ctx.customerId, 'QTY_WAIT', data);
-        const ask = `How many *${p.unit}* of *${fullName}* would you like? Reply with a number (e.g. 2).`;
+        const ask =
+          `*${fullName}*\n${money(p.price)} \u00B7 ${p.unit}\n\n` +
+          `How many would you like? Just reply with a number, e.g. *2*`;
         const wamid = await sendText(ctx.channel, ctx.customerPhone, ask);
         await ctx.logOutbound(ask, wamid);
         return true;
@@ -262,7 +294,7 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
       }
       if (btnId === 'cart_cancel') {
         await setState(ctx.customerId, 'IDLE', { cart: [], pending: null });
-        const bye = 'Cart cleared. Reply *menu* anytime to start a new order. 👍';
+        const bye = 'Basket cleared. Reply *menu* any time to start a new order.';
         const wamid = await sendText(ctx.channel, ctx.customerPhone, bye);
         await ctx.logOutbound(bye, wamid);
         return true;
@@ -279,7 +311,7 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
     if (state === 'QTY_WAIT' && data.pending) {
       const qty = parseInt(text.replace(/\D/g, ''), 10);
       if (!qty || qty < 1 || qty > 9999) {
-        const ask = `Please reply with just a number for *${data.pending.name}* (e.g. 2).`;
+        const ask = `Sorry \u2014 please reply with just a number for *${data.pending.name}*, e.g. *2*`;
         const wamid = await sendText(ctx.channel, ctx.customerPhone, ask);
         await ctx.logOutbound(ask, wamid);
         return true;
@@ -298,7 +330,7 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
     }
 
     if (state === 'CART' && data.cart.length > 0) {
-      const nudge = `You have ${data.cart.length} item(s) in your cart (₹${cartTotal(data.cart).toFixed(0)}). Tap a button above, or reply *menu* to add more.`;
+      const nudge = `You have ${data.cart.length} item(s) in your basket (${money(cartTotal(data.cart))}). Tap a button above, or reply *menu* to add more.`;
       const wamid = await sendText(ctx.channel, ctx.customerPhone, nudge);
       await ctx.logOutbound(nudge, wamid);
       return true;

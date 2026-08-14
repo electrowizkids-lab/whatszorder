@@ -20,7 +20,7 @@ import pool, { testDbConnection } from './db';
 import { authRouter, requireAuth, AuthedRequest } from './auth';
 import { channelByPhoneNumberId, channelByMerchantId, sendText, Channel } from './wa';
 import { handleIncomingMessage } from './bot';
-import { verifySignatureWith, findAccountByAccountId, rememberAccountId, savePaymentAccount, getPaymentAccount } from './razorpay';
+import { verifyStripeEvent, webhookSecretForOrder, saveStripeAccount, getStripeAccount } from './stripe';
 
 dotenv.config();
 
@@ -220,58 +220,54 @@ app.post('/webhook', async (req: Request, res: Response) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// 4. RAZORPAY WEBHOOK — flips orders to PAID
+// 4. STRIPE WEBHOOK — flips orders to PAID
+// Each merchant creates a webhook in their own Stripe dashboard
+// pointing here, and pastes the signing secret into Settings.
 // ─────────────────────────────────────────────────────────────
-app.post('/webhook/razorpay', async (req: Request, res: Response) => {
-  const signature = req.headers['x-razorpay-signature'] as string | undefined;
+app.post('/webhook/stripe', async (req: Request, res: Response) => {
+  const signature = req.headers['stripe-signature'] as string | undefined;
   const rawBody = (req as any).rawBody as Buffer | undefined;
 
-  // Route by the account that fired the event, verify with THAT
-  // merchant's webhook secret; platform env secret is the fallback.
-  const eventAccountId = (req.body?.account_id as string) || '';
-  const acctRow = eventAccountId ? await findAccountByAccountId(eventAccountId) : null;
-  const merchantSecretOk = acctRow ? verifySignatureWith(acctRow.webhook_secret, rawBody, signature) : false;
-  const envSecretOk = process.env.RAZORPAY_WEBHOOK_SECRET
-    ? verifySignatureWith(process.env.RAZORPAY_WEBHOOK_SECRET, rawBody, signature)
-    : false;
-
-  if (!merchantSecretOk && !envSecretOk) {
-    console.warn('🚫 Razorpay webhook signature failed — rejected');
-    return res.sendStatus(400);
+  // The body is UNTRUSTED here — used only to find which merchant
+  // this belongs to, so we can verify with their signing secret.
+  const orderId = Number(req.body?.data?.object?.metadata?.order_id || 0);
+  if (!orderId) {
+    console.log(`🔔 Stripe event ignored (no order_id): ${req.body?.type || 'unknown'}`);
+    return res.status(200).json({ ok: true });
   }
-  res.status(200).json({ ok: true });
+
+  const lookup = await webhookSecretForOrder(orderId);
+  if (!lookup) {
+    console.warn(`⚠️ Stripe event for unknown order ${orderId}`);
+    return res.status(200).json({ ok: true });
+  }
+
+  const event = verifyStripeEvent(rawBody, signature, lookup.secret);
+  if (!event) return res.sendStatus(400);   // nothing is trusted until here
+
+  res.status(200).json({ received: true });
+  console.log(`🔔 Stripe webhook: ${event.type}`);
 
   try {
-    console.log(`🔔 Razorpay webhook received: ${req.body?.event || 'unknown-event'}`);
-    if (req.body?.event !== 'payment_link.paid') return;
-    const linkEntity = req.body?.payload?.payment_link?.entity;
-    const paymentEntity = req.body?.payload?.payment?.entity;
-    const orderNo = linkEntity?.reference_id || '';
-    const orderIdFromNotes = Number(linkEntity?.notes?.order_id || 0);
+    if (event.type !== 'checkout.session.completed') return;
+    const session: any = event.data.object;
+    if (session.payment_status !== 'paid') return;
 
     const [rows]: any = await pool.query(
       `SELECT o.id, o.order_no, o.merchant_id, o.customer_id, o.total_amount, o.payment_status,
               c.whatsapp_id
        FROM orders o JOIN customers c ON c.id = o.customer_id
-       WHERE o.id = ? OR o.order_no = ? LIMIT 1`,
-      [orderIdFromNotes, orderNo]
+       WHERE o.id = ? LIMIT 1`,
+      [orderId]
     );
-    if (!rows.length) {
-      console.warn(`⚠️ Razorpay paid event for unknown order ${orderNo}`);
-      return;
-    }
+    if (!rows.length) return;
     const order = rows[0];
-    if (order.payment_status === 'paid') return; // idempotent — Razorpay may retry
-
-    // First verified event from an account teaches us its account_id
-    if (eventAccountId) {
-      await rememberAccountId(order.merchant_id, eventAccountId);
-    }
+    if (order.payment_status === 'paid') return;   // idempotent — Stripe retries
 
     await pool.query('UPDATE orders SET payment_status = ? WHERE id = ?', ['paid', order.id]);
     await pool.query(
       'INSERT INTO payments (order_id, gateway, gateway_payment_id, amount, status, raw_json) VALUES (?, ?, ?, ?, ?, ?)',
-      [order.id, 'razorpay', paymentEntity?.id || null, Number(order.total_amount), 'paid', JSON.stringify(req.body)]
+      [order.id, 'stripe', session.payment_intent || session.id, Number(order.total_amount), 'paid', JSON.stringify(event)]
     );
 
     emitToMerchant(order.merchant_id, 'order:paid', {
@@ -280,7 +276,7 @@ app.post('/webhook/razorpay', async (req: Request, res: Response) => {
 
     const channel = await channelByMerchantId(order.merchant_id);
     if (channel) {
-      const txt = `✅ Payment received for order *${order.order_no}*. Your order is confirmed — we will update you as it is processed. 🙏`;
+      const txt = `\u2705 Payment received for order *${order.order_no}*. Your order is confirmed \u2014 we\u2019ll keep you posted as it\u2019s prepared. Thank you!`;
       try {
         const wamid = await sendText(channel, order.whatsapp_id, txt);
         await saveMessage(order.merchant_id, order.customer_id, 'outbound', txt, wamid);
@@ -290,7 +286,7 @@ app.post('/webhook/razorpay', async (req: Request, res: Response) => {
     }
     console.log(`💰 [merchant ${order.merchant_id}] PAYMENT received for ${order.order_no}`);
   } catch (e) {
-    console.error('❌ Razorpay webhook error:', e);
+    console.error('❌ Stripe webhook error:', e);
   }
 });
 
@@ -545,17 +541,17 @@ app.delete('/api/products/:id', async (req: AuthedRequest, res: Response) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// PAYMENT ACCOUNT — merchant connects their own Razorpay (Model B)
+// PAYMENT ACCOUNT — merchant connects their own Stripe (Model B)
 // ─────────────────────────────────────────────────────────────
 app.get('/api/payment-account', async (req: AuthedRequest, res: Response) => {
   try {
-    const acct = await getPaymentAccount(req.merchantId!);
+    const acct = await getStripeAccount(req.merchantId!);
     if (!acct) return res.json({ connected: false });
     res.json({
       connected: true,
-      key_id: acct.key_id,
-      account_id: acct.account_id,
-      webhook_secret: acct.webhook_secret, // merchant pastes this into THEIR Razorpay webhook
+      gateway: 'stripe',
+      account_id: acct.key_id,
+      has_webhook: Boolean(acct.webhook_secret),
     });
   } catch (e) {
     console.error('Error fetching payment account:', e);
@@ -564,15 +560,15 @@ app.get('/api/payment-account', async (req: AuthedRequest, res: Response) => {
 });
 
 app.post('/api/payment-account', async (req: AuthedRequest, res: Response) => {
-  const { key_id, key_secret } = req.body;
-  if (!key_id?.trim() || !key_secret?.trim()) {
-    return res.status(400).json({ error: 'Both Key ID and Key Secret are required.' });
+  const { secret_key, webhook_secret } = req.body;
+  if (!secret_key?.trim()) {
+    return res.status(400).json({ error: 'Your Stripe secret key is required.' });
   }
   try {
-    const result = await savePaymentAccount(req.merchantId!, key_id.trim(), key_secret.trim());
+    const result = await saveStripeAccount(req.merchantId!, secret_key.trim(), (webhook_secret || '').trim());
     if (!result.ok) return res.status(400).json({ error: result.error });
-    console.log(`💳 [merchant ${req.merchantId}] Razorpay account connected`);
-    res.json({ success: true, account_id: result.account_id, webhook_secret: result.webhook_secret });
+    console.log(`💳 [merchant ${req.merchantId}] Stripe account connected (${result.account_id})`);
+    res.json({ success: true, account_id: result.account_id });
   } catch (e: any) {
     console.error('Error saving payment account:', e.message);
     res.status(500).json({ error: e.message.includes('TOKEN_ENC_KEY') ? e.message : 'Failed to save payment account' });
@@ -583,7 +579,7 @@ app.delete('/api/payment-account', async (req: AuthedRequest, res: Response) => 
   try {
     await pool.query(
       'DELETE FROM merchant_payment_accounts WHERE merchant_id = ? AND gateway = ?',
-      [req.merchantId, 'razorpay']
+      [req.merchantId, 'stripe']
     );
     res.json({ success: true });
   } catch (e) {
