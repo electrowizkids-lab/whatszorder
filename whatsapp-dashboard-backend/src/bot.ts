@@ -50,6 +50,32 @@ async function setState(customerId: number, state: string, data: BotState) {
 }
 
 // ── pieces of the flow ───────────────────────────────────────
+// The printed menu card: one monospace block, grouped by category,
+// prices aligned in a column. Sent before the tappable list so the
+// customer can scan everything at once.
+const CARD_MAX = 20; // keep the message scannable
+
+function menuCard(business: string, groups: { title: string; rows: { name: string; price: number; unit: string }[] }[], total: number) {
+  const lines: string[] = [];
+  let shown = 0;
+  for (const g of groups) {
+    if (shown >= CARD_MAX) break;
+    if (lines.length) lines.push('');
+    lines.push(g.title.toUpperCase());
+    for (const r of g.rows) {
+      if (shown >= CARD_MAX) break;
+      const amt = money(r.price);
+      const label = ' ' + (r.name.length > 20 ? r.name.slice(0, 19) + '.' : r.name);
+      lines.push(label + ' '.repeat(Math.max(1, W - label.length - amt.length)) + amt);
+      shown++;
+    }
+  }
+  const more = total > shown ? `\n\n_...and ${total - shown} more_` : '';
+  return `\ud83d\udecd\ufe0f *${business}*\n_Our price list_\n\n` +
+         '```' + lines.join('\n') + '```' + more +
+         `\n\nTap *View products* below to order \ud83d\udc47`;
+}
+
 async function sendCatalog(ctx: BotContext, page = 1) {
   const [rows]: any = await pool.query(
     `SELECT id, parent_id, name, unit, price FROM products
@@ -83,7 +109,7 @@ async function sendCatalog(ctx: BotContext, page = 1) {
       }
     } else {
       entries.push({
-        section: 'Menu',
+        section: '\ud83d\uded2 Menu',
         row: { id: `prod_${t.id}`, title: t.name, description: `${money(t.price)} \u00B7 ${t.unit}` },
       });
     }
@@ -107,10 +133,34 @@ async function sendCatalog(ctx: BotContext, page = 1) {
     });
   }
 
+  // Merchant's own name fronts the menu
+  const [mrows]: any = await pool.query('SELECT business_name FROM merchants WHERE id = ?', [ctx.merchantId]);
+  const business = (mrows[0]?.business_name || 'Our shop').slice(0, 40);
+
+  // Page 1 gets the scannable price-list card first
+  if (p === 1) {
+    const groups: { title: string; rows: { name: string; price: number; unit: string }[] }[] = [];
+    for (const e of entries) {
+      if (e.row.id.startsWith('page_')) continue;
+      const last = groups[groups.length - 1];
+      if (!last || last.title !== e.section) groups.push({ title: e.section, rows: [] });
+      const src = rows.find((r: any) => `prod_${r.id}` === e.row.id);
+      if (src) groups[groups.length - 1].rows.push({ name: src.name, price: Number(src.price), unit: src.unit });
+    }
+    try {
+      const cardText = menuCard(business, groups, entries.length);
+      const cardWamid = await sendText(ctx.channel, ctx.customerPhone, cardText);
+      await ctx.logOutbound('[Price list sent]', cardWamid);
+    } catch (e: any) {
+      console.error('\u274c Menu card failed:', e.message);
+    }
+  }
+
   const wamid = await sendList(ctx.channel, ctx.customerPhone, {
-    header: totalPages > 1 ? `Our Products 🛒 (${p}/${totalPages})` : 'Our Products 🛒',
-    body: 'Tap *View products* below, choose what you need, and we\u2019ll ask how many.',
+    header: totalPages > 1 ? `${business} (${p}/${totalPages})` : business,
+    body: 'Choose what you need and we\u2019ll ask how many.',
     buttonLabel: 'View products',
+    footer: 'Tap an item to add it',
     sections,
   });
   await ctx.logOutbound(`[Sent product catalog${totalPages > 1 ? ` p${p}/${totalPages}` : ''}]`, wamid);

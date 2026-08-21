@@ -65,7 +65,7 @@ export type ListSection = {
 
 export function sendList(
   channel: Channel, to: string,
-  opts: { header: string; body: string; buttonLabel: string; sections: ListSection[] }
+  opts: { header: string; body: string; buttonLabel: string; footer?: string; sections: ListSection[] }
 ) {
   return post(channel, {
     to,
@@ -74,7 +74,7 @@ export function sendList(
       type: 'list',
       header: { type: 'text', text: opts.header.slice(0, 60) },
       body: { text: opts.body.slice(0, 1024) },
-      footer: { text: 'Whatszorder' },
+      footer: { text: (opts.footer || 'Tap an item to add it').slice(0, 60) },
       action: {
         button: opts.buttonLabel.slice(0, 20),
         sections: opts.sections.slice(0, 10).map(s => ({
