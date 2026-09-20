@@ -50,3 +50,8 @@ dist
 .env.*
 *.local
 .DS_Store
+*.env
+.env
+.env.*
+* Copy*
+*- Copy*

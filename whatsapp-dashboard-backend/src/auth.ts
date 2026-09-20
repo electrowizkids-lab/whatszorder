@@ -64,7 +64,10 @@ async function sendOtp(phone: string, code: string) {
     throw new Error('AUTH_TEMPLATE_NAME not set — cannot send OTP via WhatsApp. Create an Authentication template in Meta and set its name in .env.');
   }
 
-  await axios.post(
+  // Say exactly what we are about to do — silence is not evidence.
+  console.log(`📨 Sending OTP template "${templateName}" from phone_id ${phoneId} to ${phone}`);
+
+  const resp = await axios.post(
     `https://graph.facebook.com/v21.0/${phoneId}/messages`,
     {
       messaging_product: 'whatsapp',
@@ -82,6 +85,16 @@ async function sendOtp(phone: string, code: string) {
     },
     { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
   );
+
+  // Meta returns the wamid and the resolved recipient. If wa_id differs
+  // from what we sent, WhatsApp re-mapped the number — a common cause
+  // of "accepted but never arrived".
+  const wamid = resp.data?.messages?.[0]?.id;
+  const waId = resp.data?.contacts?.[0]?.wa_id;
+  console.log(`✅ Meta accepted the OTP · wamid=${wamid} · wa_id=${waId}`);
+  if (waId && waId !== phone) {
+    console.warn(`⚠️  WhatsApp resolved ${phone} to ${waId} — delivery goes to the resolved number.`);
+  }
 }
 
 // ── Router ───────────────────────────────────────────────────
@@ -124,7 +137,19 @@ authRouter.post('/request-otp', async (req: Request, res: Response) => {
     await sendOtp(phone, code);
     res.json({ success: true, message: `OTP sent. Valid for ${OTP_TTL_MINUTES} minutes.` });
   } catch (e: any) {
-    console.error('❌ request-otp failed:', e.response?.data?.error?.message || e.message);
+    // Surface Meta's full error — error_data.details usually names
+    // the real cause, which the headline message often hides.
+    const metaErr = e.response?.data?.error;
+    if (metaErr) {
+      console.error('❌ request-otp failed (Meta):', {
+        message: metaErr.message,
+        code: metaErr.code,
+        subcode: metaErr.error_subcode,
+        details: metaErr.error_data?.details,
+      });
+    } else {
+      console.error('❌ request-otp failed:', e.message);
+    }
     res.status(500).json({ error: 'Could not send OTP. Please try again.' });
   }
 });
@@ -138,8 +163,8 @@ authRouter.post('/verify-otp', async (req: Request, res: Response) => {
   }
 
   try {
-	const [rows]: any = await pool.query(
-      'SELECT *, (expires_at < NOW()) AS is_expired FROM otp_codes WHERE phone = ? ORDER BY id DESC LIMIT 1',
+    const [rows]: any = await pool.query(
+      'SELECT * FROM otp_codes WHERE phone = ? ORDER BY id DESC LIMIT 1',
       [phone]
     );
     if (rows.length === 0) {
@@ -147,7 +172,7 @@ authRouter.post('/verify-otp', async (req: Request, res: Response) => {
     }
     const record = rows[0];
 
-	if (record.is_expired) {
+    if (new Date(record.expires_at).getTime() < Date.now()) {
       return res.status(400).json({ error: 'Code expired. Request a new OTP.' });
     }
     if (record.attempts >= MAX_ATTEMPTS) {

@@ -408,6 +408,26 @@ function Docket({ o, onAdvance, demo }) {
    Content sourced from yanvio.com (genuine Yanvio copy).
    Identity details use YANVIO LTD's real UK registration.
    ═══════════════════════════════════════════════════════════ */
+// ── Brand mark ──────────────────────────────────────────────
+// Put a SQUARE, TRANSPARENT png at: public/yanvio-mark.png
+// (just the circular icon — no wordmark; the word is live text
+// so it stays crisp at every size). Falls back to a lettered
+// tile if the file is missing, so nothing ever looks broken.
+function Mark({ size = 34, radius = 10 }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <span style={{ width: size, height: size, borderRadius: radius, background: '#F0A830',
+        color: '#0E3529', display: 'grid', placeItems: 'center', fontWeight: 800,
+        fontSize: size * 0.5, flexShrink: 0 }}>Y</span>
+    );
+  }
+  return (
+    <img src="/yanvio-mark.png" alt="" width={size} height={size} onError={() => setFailed(true)}
+      style={{ display: 'block', objectFit: 'contain', flexShrink: 0 }} />
+  );
+}
+
 const SITE_NAV = [
   ['home', 'Home'], ['about', 'About'], ['services', 'Services'],
   ['clients', 'Clients'], ['contact', 'Contact'],
@@ -416,6 +436,22 @@ const SITE_NAV = [
 function Landing({ onLogin }) {
   const [page, setPage] = useState('home');
   const [menu, setMenu] = useState(false);
+  const [stuck, setStuck] = useState(false);
+  // Deep links: yanvio.com/#privacy and #terms open those pages directly
+  useEffect(() => {
+    const fromHash = () => {
+      const h = (window.location.hash || '').replace('#', '');
+      if (h === 'privacy' || h === 'terms') setPage(h);
+    };
+    fromHash();
+    window.addEventListener('hashchange', fromHash);
+    return () => window.removeEventListener('hashchange', fromHash);
+  }, []);
+  useEffect(() => {
+    const onScroll = () => setStuck(window.scrollY > 12);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
   const go = (p) => { setPage(p); setMenu(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   return (
@@ -438,16 +474,24 @@ function Landing({ onLogin }) {
           -webkit-mask:radial-gradient(circle 21px at 50% 0,#0000 99%,#000) 50% 0/44px 100% repeat-x;
           mask:radial-gradient(circle 21px at 50% 0,#0000 99%,#000) 50% 0/44px 100% repeat-x;
           transform:scaleY(-1)}
-        .sfnav{display:flex;align-items:center;gap:12px;padding:20px 0}
-        .sflogo{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:800;
-          letter-spacing:-.02em;color:#fff;cursor:pointer;background:none;border:none}
-        .sflogo i{width:32px;height:32px;border-radius:9px;background:var(--amber);color:var(--green-ink);
-          display:grid;place-items:center;font-style:normal;font-weight:800;font-size:16px}
+        .navwrap{position:sticky;top:0;z-index:50;background:var(--green);
+          transition:box-shadow .2s,background .2s}
+        .navwrap.stuck{box-shadow:0 2px 20px rgba(0,0,0,.22);
+          background:rgba(15,58,46,.96);backdrop-filter:blur(10px)}
+        .sfnav{display:flex;align-items:center;gap:14px;padding:16px 0}
+        .sflogo{display:flex;align-items:center;gap:11px;font-size:21px;font-weight:800;
+          letter-spacing:-.025em;color:#fff;cursor:pointer;background:none;border:none;padding:0}
+        .sflogo:hover{opacity:.92}
+        .sflogo .lockup{display:flex;flex-direction:column;align-items:flex-start;line-height:1}
+        .sflogo .tag{font-size:10px;font-weight:600;letter-spacing:.15em;text-transform:uppercase;
+          color:rgba(255,255,255,.5);margin-top:3px}
         .menu{display:flex;gap:4px;margin-left:auto;align-items:center}
-        .mlink{background:none;border:none;color:rgba(255,255,255,.78);font-size:14.5px;font-weight:600;
-          padding:8px 13px;border-radius:8px;cursor:pointer;transition:.14s}
-        .mlink:hover{color:#fff;background:rgba(255,255,255,.1)}
-        .mlink.on{color:#fff;background:rgba(255,255,255,.16)}
+        .mlink{background:none;border:none;color:rgba(255,255,255,.74);font-size:14.5px;font-weight:600;
+          padding:9px 14px;border-radius:9px;cursor:pointer;transition:.16s;position:relative}
+        .mlink:hover{color:#fff}
+        .mlink.on{color:#fff}
+        .mlink.on::after{content:'';position:absolute;left:14px;right:14px;bottom:2px;height:2px;
+          border-radius:2px;background:var(--amber)}
         .navlink{padding:9px 18px;border-radius:9px;text-decoration:none;font-weight:700;font-size:14px;
           background:var(--amber);color:var(--green-ink);margin-left:8px;transition:.16s}
         .navlink:hover{filter:brightness(1.06)}
@@ -630,9 +674,35 @@ function Landing({ onLogin }) {
       `}</style>
 
       <div className={`awning ${page === 'home' ? 'tall' : 'short'}`} style={{ position: 'relative' }}>
-        <div className="w">
+        <div className={`navwrap${stuck ? ' stuck' : ''}`}>
+          <div className="w">
           <nav className="sfnav">
-            <button className="sflogo dsp" onClick={() => go('home')}><i>Y</i>Yanvio</button>
+<button 
+  className="sflogo dsp" 
+  onClick={() => go('home')} 
+  aria-label="Yanvio home"
+>
+  <img 
+    src="/yanvio-mark.png" 
+    alt="Yanvio" 
+    style={{ 
+      height: '36px', 
+      width: 'auto', 
+      display: 'block', 
+      objectFit: 'contain',
+      filter: 'drop-shadow(0 2px 6px rgba(0, 0, 0, 0.15))',
+      transition: 'transform 0.2s ease, filter 0.2s ease'
+    }} 
+    onMouseOver={(e) => {
+      e.currentTarget.style.transform = 'translateY(-1px)';
+      e.currentTarget.style.filter = 'drop-shadow(0 4px 10px rgba(0, 0, 0, 0.25))';
+    }}
+    onMouseOut={(e) => {
+      e.currentTarget.style.transform = 'translateY(0)';
+      e.currentTarget.style.filter = 'drop-shadow(0 2px 6px rgba(0, 0, 0, 0.15))';
+    }}
+  />
+</button>
             <button className="burger" onClick={() => setMenu(m => !m)}>{menu ? '✕' : '☰'}</button>
             <div className={`menu${menu ? ' open' : ''}`}>
               {SITE_NAV.map(([id, label]) => (
@@ -641,6 +711,9 @@ function Landing({ onLogin }) {
               <a href="#login" className="navlink" onClick={() => { setMenu(false); setPage('home'); }}>Log in</a>
             </div>
           </nav>
+          </div>
+        </div>
+        <div className="w">
 
           {page === 'home' && (
             <section className="hero">
@@ -664,7 +737,8 @@ function Landing({ onLogin }) {
           {page !== 'home' && (
             <div className="phead">
               <h1 className="dsp">{
-                { about: 'About us', services: 'Our services', clients: 'Our clients', contact: 'Contact us' }[page]
+                { about: 'About us', services: 'Our services', clients: 'Our clients',
+                  contact: 'Contact us', privacy: 'Privacy Policy', terms: 'Terms of Service' }[page]
               }</h1>
               <p className="kk">{
                 {
@@ -672,6 +746,8 @@ function Landing({ onLogin }) {
                   services: 'Just say the word — we can automate it',
                   clients: 'Built on trust and collaboration',
                   contact: "We'd love to hear from you",
+                  privacy: 'How Yanvio handles personal data',
+                  terms: 'The agreement between you and YANVIO LTD',
                 }[page]
               }</p>
             </div>
@@ -685,12 +761,16 @@ function Landing({ onLogin }) {
         {page === 'services' && <ServicesPage go={go} />}
         {page === 'clients' && <ClientsPage go={go} />}
         {page === 'contact' && <ContactPage />}
+        {page === 'privacy' && <PrivacyPage />}
       </div>
 
       <div className="w">
         <footer className="sffoot">
           <div>
-            <div className="dsp" style={{ fontSize: 18, color: 'var(--ink)', marginBottom: 10 }}>Yanvio</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 11 }}>
+              <Mark size={30} radius={9} />
+              <span className="dsp" style={{ fontSize: 18, color: 'var(--ink)' }}>Yanvio</span>
+            </div>
             <div>Turn WhatsApp conversations into automated order workflows — simple, scalable, and built for SMEs.</div>
           </div>
           <div>
@@ -698,6 +778,7 @@ function Landing({ onLogin }) {
             {SITE_NAV.slice(1).map(([id, label]) => (
               <button key={id} onClick={() => go(id)}>{label}</button>
             ))}
+            <button onClick={() => go('privacy')}>Privacy Policy</button>
           </div>
           <div>
             <h5>Get in touch</h5>
@@ -996,6 +1077,157 @@ function ClientsPage({ go }) {
         <button className="bigbtn" onClick={() => go('about')}>About us</button>
       </section>
     </>
+  );
+}
+
+function PrivacyPage() {
+  const S = ({ n, title, children }) => (
+    <section style={{ marginBottom: 30 }}>
+      <h2 className="dsp" style={{ fontSize: 19, margin: '0 0 10px', letterSpacing: '-.02em' }}>
+        <span style={{ color: 'var(--green-2)', marginRight: 9 }}>{n}.</span>{title}
+      </h2>
+      <div style={{ fontSize: 14.5, color: 'var(--ink-2)', lineHeight: 1.72 }}>{children}</div>
+    </section>
+  );
+  const Row = ({ a, b }) => (
+    <tr>
+      <td style={{ padding: '9px 14px 9px 0', verticalAlign: 'top', fontWeight: 600, color: 'var(--ink)', width: 190 }}>{a}</td>
+      <td style={{ padding: '9px 0', verticalAlign: 'top' }}>{b}</td>
+    </tr>
+  );
+  return (
+    <section className="sec" style={{ maxWidth: 780 }}>
+      <div style={{ background: 'var(--amber-soft)', border: '1px solid #F3E2C0', borderRadius: 12,
+        padding: '13px 16px', fontSize: 13.5, color: 'var(--ink-2)', lineHeight: 1.6, marginBottom: 30 }}>
+        <b style={{ color: 'var(--ink)' }}>Last updated:</b> 15 September 2026 &nbsp;·&nbsp;
+        <b style={{ color: 'var(--ink)' }}>Data controller:</b> YANVIO LTD, company number 17382620
+      </div>
+
+      <S n="1" title="Who we are">
+        Yanvio is a service operated by <b>YANVIO LTD</b>, a company registered in England and
+        Wales under company number <span className="mono">17382620</span>, with its registered
+        office at 6 Winstanley Lane, Milton Keynes, MK5 7BT, United Kingdom.
+        <br /><br />
+        Yanvio lets businesses (“merchants”) take customer orders through WhatsApp and manage
+        those orders on a dashboard. You can contact us at any time about this policy at{' '}
+        <a href="mailto:info@yanvio.com" style={{ color: 'var(--green-2)', fontWeight: 600 }}>info@yanvio.com</a>.
+      </S>
+
+      <S n="2" title="Our role: controller and processor">
+        Our role under UK GDPR depends on whose data it is.
+        <br /><br />
+        <b>We are the data controller</b> for information about merchants — the businesses who hold
+        a Yanvio account. We decide how that information is used to provide and bill for the service.
+        <br /><br />
+        <b>We are a data processor</b> for information about a merchant’s own customers — the people
+        who message that merchant on WhatsApp. The merchant is the controller of that data and
+        decides why it is collected; we process it on their instructions in order to run the
+        ordering service on their behalf.
+      </S>
+
+      <S n="3" title="What we collect">
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14.5 }}>
+          <tbody>
+            <Row a="Merchant account" b="Business name, the WhatsApp number used to sign in, and your WhatsApp Business account identifiers." />
+            <Row a="Product catalogue" b="The items, options, prices and photographs you choose to list." />
+            <Row a="Payment connection" b="Your payment provider’s API credentials, held encrypted. We never see or store your customers’ card details — those go directly to Stripe." />
+            <Row a="Customer contact" b="The customer’s WhatsApp number and the profile name WhatsApp provides." />
+            <Row a="Messages" b="The content of messages exchanged between a customer and the merchant’s WhatsApp number, so the merchant can see the conversation." />
+            <Row a="Orders" b="Items ordered, quantities, totals, payment status and order history." />
+            <Row a="Technical" b="Server logs, IP addresses and timestamps, kept for security and troubleshooting." />
+          </tbody>
+        </table>
+        <br />
+        We do not knowingly collect special category data, and we ask that you do not send it
+        through Yanvio.
+      </S>
+
+      <S n="4" title="Why we use it, and our lawful basis">
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14.5 }}>
+          <tbody>
+            <Row a="Providing the service" b="Performance of a contract — we cannot deliver orders or take payments without this data." />
+            <Row a="Sending order updates" b="Performance of a contract, and the merchant’s own lawful basis for contacting their customer." />
+            <Row a="Merchant sign-in codes" b="Performance of a contract, and our legitimate interest in keeping accounts secure." />
+            <Row a="Security, fraud prevention, troubleshooting" b="Our legitimate interests in operating a safe and reliable service." />
+            <Row a="Legal and accounting records" b="Compliance with a legal obligation." />
+          </tbody>
+        </table>
+      </S>
+
+      <S n="5" title="Who we share it with">
+        We do not sell personal data and we never share it for advertising. We use a small number
+        of service providers who process data on our behalf:
+        <br /><br />
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14.5 }}>
+          <tbody>
+            <Row a="Meta Platforms" b="Delivers WhatsApp messages between customers and merchants." />
+            <Row a="Stripe" b="Processes payments. Card details are handled by Stripe, never by us." />
+            <Row a="Render" b="Hosts the application servers." />
+            <Row a="Aiven" b="Hosts the database." />
+            <Row a="Cloudinary" b="Stores product photographs uploaded by merchants." />
+            <Row a="IONOS" b="Hosts the website." />
+          </tbody>
+        </table>
+        <br />
+        We may also disclose information where we are legally required to do so.
+      </S>
+
+      <S n="6" title="Where your data is held">
+        We host data within the United Kingdom and the European Economic Area. Where a provider
+        processes data outside the UK, we rely on UK adequacy regulations or on standard
+        contractual clauses approved for use in the UK, so that your information keeps an
+        equivalent level of protection.
+      </S>
+
+      <S n="7" title="How long we keep it">
+        We keep merchant account records for as long as the account is open, and for up to six
+        years afterwards where we need them for tax and accounting purposes. Messages and order
+        records are kept while the merchant’s account is active, and are deleted when the merchant
+        deletes them or closes their account. Server logs are kept for a short period for security
+        purposes. A merchant may ask us to delete their data at any time.
+      </S>
+
+      <S n="8" title="Keeping it secure">
+        Connections are encrypted in transit using TLS. Payment credentials are encrypted at rest
+        using AES-256-GCM. Access to merchant data is restricted so that each merchant can only
+        reach their own records, and administrative access is limited to those who need it.
+        No system is perfectly secure, but we take these obligations seriously and will notify you
+        and the ICO of a qualifying breach as the law requires.
+      </S>
+
+      <S n="9" title="Your rights">
+        Under UK data protection law you have the right to access your data, to have inaccurate
+        data corrected, to have data erased, to restrict or object to processing, and to receive
+        your data in a portable format.
+        <br /><br />
+        To exercise any of these, email{' '}
+        <a href="mailto:info@yanvio.com" style={{ color: 'var(--green-2)', fontWeight: 600 }}>info@yanvio.com</a>.
+        We will respond within one month.
+        <br /><br />
+        If you are a customer of a business that uses Yanvio, please contact that business first,
+        as they control your data. If they direct you to us, we will help.
+        <br /><br />
+        You also have the right to complain to the Information Commissioner’s Office at{' '}
+        <a href="https://ico.org.uk" target="_blank" rel="noopener noreferrer"
+          style={{ color: 'var(--green-2)', fontWeight: 600 }}>ico.org.uk</a>.
+      </S>
+
+      <S n="10" title="Cookies and similar technologies">
+        Yanvio does not use advertising or tracking cookies. We store a small amount of information
+        in your browser so that you stay signed in to the dashboard and so that your light or dark
+        theme choice is remembered. These are necessary for the service to work.
+      </S>
+
+      <S n="11" title="Changes to this policy">
+        We may update this policy as the service develops. The date at the top shows when it last
+        changed, and we will tell merchants directly about any significant change.
+      </S>
+
+      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 20, fontSize: 13.5, color: 'var(--ink-faint)', lineHeight: 1.7 }}>
+        YANVIO LTD · Company number 17382620 · 6 Winstanley Lane, Milton Keynes, MK5 7BT,
+        United Kingdom · <a href="mailto:info@yanvio.com" style={{ color: 'var(--green-2)' }}>info@yanvio.com</a>
+      </div>
+    </section>
   );
 }
 
@@ -1458,7 +1690,7 @@ function Dashboard({ token, merchant, onLogout }) {
 
       <aside className="rail">
         <div className="brand">
-          <div className="mark dsp">Y</div>
+          <Mark size={32} radius={9} />
           <div style={{ minWidth: 0 }}>
             <div className="dsp" style={{ fontSize: 16, lineHeight: 1.1 }}>Yanvio</div>
             <div style={{ fontSize: 11.5, color: 'var(--faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{biz}</div>
