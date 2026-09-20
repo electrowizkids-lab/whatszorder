@@ -90,6 +90,54 @@ export function sendList(
   });
 }
 
+// ── FLOW message (multi-select form) ────────────────────────
+// Sent as an interactive CTA inside an open 24-hour window, so no
+// template approval is needed. The product list is injected at
+// send time via flow_action_payload.data, which means ONE published
+// Flow serves every merchant with their own catalogue.
+export type FlowRow = { id: string; title: string; description?: string };
+
+export function sendFlow(
+  channel: Channel, to: string,
+  opts: {
+    flowId: string;
+    flowToken: string;
+    header: string;
+    body: string;
+    footer?: string;
+    cta: string;
+    screen: string;
+    data: Record<string, any>;
+    draft?: boolean;
+  }
+) {
+  return post(channel, {
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'flow',
+      header: { type: 'text', text: opts.header.slice(0, 60) },
+      body: { text: opts.body.slice(0, 1024) },
+      footer: { text: (opts.footer || 'Tap to choose').slice(0, 60) },
+      action: {
+        name: 'flow',
+        parameters: {
+          flow_message_version: '3',
+          flow_token: opts.flowToken,
+          flow_id: opts.flowId,
+          flow_cta: opts.cta.slice(0, 20),
+          ...(opts.draft ? { mode: 'draft' } : {}),
+          flow_action: 'navigate',
+          flow_action_payload: {
+            screen: opts.screen,
+            data: opts.data,
+          },
+        },
+      },
+    },
+  });
+}
+
 // ── IMAGE message (product photo with caption) ──────────────
 // `link` must be a public HTTPS URL WhatsApp's servers can fetch.
 export function sendImage(

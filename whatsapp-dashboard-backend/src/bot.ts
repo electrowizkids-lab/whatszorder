@@ -6,13 +6,18 @@
 // Without Razorpay keys, orders confirm exactly as before.
 // ─────────────────────────────────────────────────────────────
 import pool from './db';
-import { Channel, sendText, sendList, sendButtons, sendImage, ListSection } from './wa';
+import { Channel, sendText, sendList, sendButtons, sendImage, sendFlow, ListSection } from './wa';
 import { createCheckoutForMerchant } from './stripe';
 
 const GREETING = /^(hi|hii+|hello|hey|namaste|namaskar|menu|order|start|catalog|catalogue)\b/i;
 
 type CartItem = { product_id: number; name: string; unit: string; price: number; qty: number };
-type BotState = { cart: CartItem[]; pending: Omit<CartItem, 'qty'> | null };
+type BotState = {
+  cart: CartItem[];
+  pending: Omit<CartItem, 'qty'> | null;
+  // Items picked in the Flow that still need a quantity, asked one by one
+  queue?: Omit<CartItem, 'qty'>[];
+};
 
 export type BotContext = {
   channel: Channel;
@@ -38,6 +43,7 @@ async function getState(customerId: number): Promise<{ state: string; data: BotS
   }
   data.cart = data.cart || [];
   data.pending = data.pending || null;
+  data.queue = data.queue || [];
   return { state: rows[0].state || 'IDLE', data };
 }
 
@@ -192,6 +198,77 @@ function receipt(cart: CartItem[], totalLabel = 'TOTAL') {
 }
 
 // Plain one-line summary for the dashboard chat log
+// ── Multi-select menu via WhatsApp Flows ────────────────────
+// Falls back to the tappable list if no flow is configured.
+const FLOW_ID = process.env.WHATSAPP_FLOW_ID;
+const FLOW_SCREEN = process.env.WHATSAPP_FLOW_SCREEN || 'ORDER';
+const FLOW_MAX = 20; // CheckboxGroup limit
+
+async function sendFlowMenu(ctx: BotContext): Promise<boolean> {
+  if (!FLOW_ID) return false;
+
+  const [rows]: any = await pool.query(
+    `SELECT p.id, p.name, p.unit, p.price, par.name AS parent_name
+     FROM products p
+     LEFT JOIN products par ON par.id = p.parent_id
+     WHERE p.merchant_id = ? AND p.active = 1
+       AND (p.parent_id IS NOT NULL
+            OR NOT EXISTS (SELECT 1 FROM products k
+                           WHERE k.parent_id = p.id AND k.active = 1))
+     ORDER BY p.sort_order, p.id
+     LIMIT ?`,
+    [ctx.merchantId, FLOW_MAX]
+  );
+  if (rows.length < 2) return false; // CheckboxGroup needs at least 2
+
+  const [mrows]: any = await pool.query('SELECT business_name FROM merchants WHERE id = ?', [ctx.merchantId]);
+  const business = (mrows[0]?.business_name || 'Our shop').slice(0, 40);
+
+  const products = rows.map((r: any) => ({
+    id: String(r.id),
+    title: (r.parent_name ? `${r.parent_name} \u2014 ${r.name}` : r.name).slice(0, 80),
+    description: `${money(r.price)} \u00B7 ${r.unit}`.slice(0, 300),
+  }));
+
+  try {
+    const wamid = await sendFlow(ctx.channel, ctx.customerPhone, {
+      flowId: FLOW_ID,
+      flowToken: `c${ctx.customerId}-${Date.now()}`,
+      header: business,
+      body: 'Tick everything you need, then tap Continue. We\u2019ll ask how many of each.',
+      footer: 'Choose as many as you like',
+      cta: 'Start order',
+      screen: FLOW_SCREEN,
+      data: { products },
+    });
+    await ctx.logOutbound('[Sent order form]', wamid);
+    return true;
+  } catch (e: any) {
+    console.error('\u274c Flow send failed, falling back to list:', e.message);
+    return false;
+  }
+}
+
+// Ask for the next queued item's quantity, or review the basket if done.
+async function askNextQuantity(ctx: BotContext, data: BotState) {
+  const next = (data.queue || []).shift();
+  if (!next) {
+    data.pending = null;
+    await setState(ctx.customerId, 'CART', data);
+    await sendCartReview(ctx, data);
+    return;
+  }
+  data.pending = next;
+  await setState(ctx.customerId, 'QTY_WAIT', data);
+  const left = (data.queue || []).length;
+  const ask =
+    `*${next.name}*\n${money(next.price)} \u00B7 ${next.unit}\n\n` +
+    `How many would you like? Reply with a number, e.g. *2*` +
+    (left > 0 ? `\n\n_${left} more item${left > 1 ? 's' : ''} after this_` : '');
+  const wamid = await sendText(ctx.channel, ctx.customerPhone, ask);
+  await ctx.logOutbound(ask, wamid);
+}
+
 function cartLines(cart: CartItem[]) {
   return cart.map(c => `${c.qty} x ${c.name} ${money(c.qty * c.price)}`).join(', ');
 }
@@ -273,6 +350,51 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
   if (message.type === 'interactive') {
     const kind = message.interactive?.type;
 
+    // ── Flow submitted: several items picked at once ──
+    if (kind === 'nfm_reply') {
+      let picked: string[] = [];
+      try {
+        const raw = JSON.parse(message.interactive.nfm_reply?.response_json || '{}');
+        const items = raw.items ?? raw.selected ?? [];
+        picked = (Array.isArray(items) ? items : [items]).map((x: any) =>
+          typeof x === 'string' ? x : String(x?.id ?? x?.value ?? '')
+        ).filter(Boolean);
+      } catch {
+        picked = [];
+      }
+
+      if (!picked.length) {
+        const msg = 'Nothing was selected. Reply *menu* to open the order form again.';
+        const wamid = await sendText(ctx.channel, ctx.customerPhone, msg);
+        await ctx.logOutbound(msg, wamid);
+        return true;
+      }
+
+      const [rows]: any = await pool.query(
+        `SELECT p.id, p.name, p.unit, p.price, par.name AS parent_name
+         FROM products p
+         LEFT JOIN products par ON par.id = p.parent_id
+         WHERE p.merchant_id = ? AND p.active = 1 AND p.id IN (?)
+         ORDER BY p.sort_order, p.id`,
+        [ctx.merchantId, picked]
+      );
+
+      data.queue = rows.map((r: any) => ({
+        product_id: r.id,
+        name: r.parent_name ? `${r.parent_name} \u2014 ${r.name}` : r.name,
+        unit: r.unit,
+        price: Number(r.price),
+      }));
+
+      const n = data.queue.length;
+      const intro = `\u2705 ${n} item${n > 1 ? 's' : ''} selected. Let\u2019s get the quantities.`;
+      const wamid = await sendText(ctx.channel, ctx.customerPhone, intro);
+      await ctx.logOutbound(intro, wamid);
+
+      await askNextQuantity(ctx, data);
+      return true;
+    }
+
     if (kind === 'list_reply') {
       const rowId: string = message.interactive.list_reply?.id || '';
       if (rowId.startsWith('page_')) {
@@ -329,7 +451,8 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
       const btnId: string = message.interactive.button_reply?.id || '';
 
       if (btnId === 'cart_add') {
-        await sendCatalog(ctx);
+        const usedFlow = await sendFlowMenu(ctx);
+        if (!usedFlow) await sendCatalog(ctx);
         await setState(ctx.customerId, 'CART', data);
         return true;
       }
@@ -339,11 +462,11 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
           return true;
         }
         await createOrder(ctx, data);
-        await setState(ctx.customerId, 'IDLE', { cart: [], pending: null });
+        await setState(ctx.customerId, 'IDLE', { cart: [], pending: null, queue: [] });
         return true;
       }
       if (btnId === 'cart_cancel') {
-        await setState(ctx.customerId, 'IDLE', { cart: [], pending: null });
+        await setState(ctx.customerId, 'IDLE', { cart: [], pending: null, queue: [] });
         const bye = 'Basket cleared. Reply *menu* any time to start a new order.';
         const wamid = await sendText(ctx.channel, ctx.customerPhone, bye);
         await ctx.logOutbound(bye, wamid);
@@ -368,13 +491,21 @@ export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
       }
       data.cart.push({ ...data.pending, qty });
       data.pending = null;
+
+      // More items queued from the Flow? Ask the next one.
+      if ((data.queue || []).length > 0) {
+        await askNextQuantity(ctx, data);
+        return true;
+      }
+
       await setState(ctx.customerId, 'CART', data);
       await sendCartReview(ctx, data);
       return true;
     }
 
     if (GREETING.test(text)) {
-      await sendCatalog(ctx);
+      const usedFlow = await sendFlowMenu(ctx);
+      if (!usedFlow) await sendCatalog(ctx);
       await setState(ctx.customerId, data.cart.length > 0 ? 'CART' : 'IDLE', data);
       return true;
     }

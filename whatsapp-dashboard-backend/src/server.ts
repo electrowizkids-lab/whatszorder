@@ -110,6 +110,17 @@ function displayText(message: any): string {
     const i = message.interactive;
     if (i?.type === 'list_reply') return `🛒 Selected: ${i.list_reply?.title || ''}`;
     if (i?.type === 'button_reply') return `👉 ${i.button_reply?.title || ''}`;
+    if (i?.type === 'nfm_reply') {
+      // Flow submission — summarise how many items were picked
+      try {
+        const r = JSON.parse(i.nfm_reply?.response_json || '{}');
+        const items = r.items ?? r.selected ?? [];
+        const n = Array.isArray(items) ? items.length : (items ? 1 : 0);
+        return `📝 Order form submitted — ${n} item${n === 1 ? '' : 's'} selected`;
+      } catch {
+        return '📝 Order form submitted';
+      }
+    }
     return '[interactive message]';
   }
   return `[${message.type} message]`;
