@@ -151,8 +151,31 @@ app.post('/webhook', async (req: Request, res: Response) => {
   try {
     if (body.object !== 'whatsapp_business_account') return;
     const changeValue = body.entry?.[0]?.changes?.[0]?.value;
+
+    // ── DELIVERY STATUS CALLBACKS ──
+    // Meta reports sent / delivered / read / failed here. A failed
+    // status carries the real reason a message never arrived, so we
+    // log it rather than discarding it.
+    const status = changeValue?.statuses?.[0];
+    if (status) {
+      const line = `📡 Status: ${status.status} · wamid=${status.id} · to=${status.recipient_id}`;
+      if (status.status === 'failed') {
+        const err = status.errors?.[0];
+        console.error(`❌ DELIVERY FAILED · to=${status.recipient_id}`, {
+          code: err?.code,
+          title: err?.title,
+          message: err?.message,
+          details: err?.error_data?.details,
+          href: err?.href,
+        });
+      } else {
+        console.log(line);
+      }
+      return;
+    }
+
     const message = changeValue?.messages?.[0];
-    if (!message) return; // status callbacks — ignore
+    if (!message) return; // nothing actionable in this payload
 
     // Route to the owning merchant
     const phoneNumberId = changeValue?.metadata?.phone_number_id;
