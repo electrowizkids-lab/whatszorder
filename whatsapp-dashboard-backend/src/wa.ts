@@ -2,6 +2,7 @@
 // Used by both server.ts (manual sends) and bot.ts (ordering flow).
 import axios from 'axios';
 import pool from './db';
+import { decrypt } from './secure';
 
 export type Channel = {
   id: number;
@@ -28,10 +29,17 @@ export async function channelByMerchantId(merchantId: number): Promise<Channel |
   return rows.length ? rows[0] : null;
 }
 
-// Phase 1: per-merchant token is NULL ➜ fall back to env token.
-// Phase 3 (Embedded Signup) fills channel.access_token per merchant.
+// Merchants onboarded through Embedded Signup have their own business
+// token, stored encrypted (iv.tag.cipher). Merchants added by hand have
+// NULL and fall back to the platform token in .env.
 function tokenFor(channel: Channel): string {
-  return channel.access_token || process.env.META_ACCESS_TOKEN || '';
+  const stored = channel.access_token;
+  if (!stored) return process.env.META_ACCESS_TOKEN || '';
+  try {
+    return decrypt(stored);
+  } catch {
+    return stored;   // a plain token stored before encryption existed
+  }
 }
 
 async function post(channel: Channel, payload: any): Promise<string | null> {

@@ -19,7 +19,8 @@ import jwt from 'jsonwebtoken';
 import pool, { testDbConnection } from './db';
 import { authRouter, requireAuth, AuthedRequest } from './auth';
 import { channelByPhoneNumberId, channelByMerchantId, sendText, Channel } from './wa';
-import { handleIncomingMessage } from './bot';
+import { handleIncomingMessage, pauseBot } from './bot';
+import { handlePartnerAdded, handleAccountUpdateOther, onboardingConfigProblems } from './onboarding';
 import { verifyStripeEvent, webhookSecretForOrder, saveStripeAccount, getStripeAccount } from './stripe';
 
 dotenv.config();
@@ -134,6 +135,74 @@ app.get('/ping', (_req: Request, res: Response) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// EMBEDDED SIGNUP RETURN PAGE
+// Where Meta sends the shop owner once they've finished signing up.
+// The actual work happens on the account_update webhook; this route
+// exists to land them somewhere friendly — and, on the first live
+// onboarding, to record exactly what Meta puts in the URL. Read that
+// row in onboarding_events before assuming anything about the shape.
+// ─────────────────────────────────────────────────────────────
+app.get('/onboarding/callback', async (req: Request, res: Response) => {
+  const q = req.query || {};
+  console.log('🔗 Onboarding callback:', JSON.stringify(q));
+  try {
+    await pool.query(
+      'INSERT INTO onboarding_events (event, status, raw_json) VALUES (?, ?, ?)',
+      ['SIGNUP_REDIRECT', q.error ? 'error' : 'ok', JSON.stringify(q).slice(0, 60000)]
+    );
+  } catch { /* landing them somewhere matters more than the audit row */ }
+
+  const site = process.env.FRONTEND_URL || 'https://yanvio.com';
+  res.redirect(302, `${site}/#${q.error ? 'connect-failed' : 'connected'}`);
+});
+
+// ─────────────────────────────────────────────────────────────
+// COEXISTENCE — the shop owner's own replies
+// In Coexistence the merchant keeps answering from the WhatsApp
+// Business app on their phone, on the same number the bot is on.
+// Meta echoes those messages to us. Two things follow: we record
+// the reply so the dashboard shows the whole conversation rather
+// than half of it, and we park the bot so it stops interrupting.
+// ─────────────────────────────────────────────────────────────
+async function handleMessageEcho(value: any) {
+  const phoneNumberId = value?.metadata?.phone_number_id;
+  const channel = phoneNumberId ? await channelByPhoneNumberId(phoneNumberId) : null;
+  if (!channel) {
+    console.warn(`⚠️ Echo for unknown phone_number_id ${phoneNumberId} — ignored`);
+    return;
+  }
+  const merchantId = channel.merchant_id;
+
+  // Shape not yet confirmed against a live payload — accept either key.
+  const raw = value?.message_echoes ?? value?.messages ?? [];
+  const echoes = Array.isArray(raw) ? raw : [raw];
+
+  for (const echo of echoes) {
+    const customerPhone = echo?.to;
+    if (!customerPhone) continue;
+
+    const [rows]: any = await pool.query(
+      'SELECT id FROM customers WHERE merchant_id = ? AND whatsapp_id = ?',
+      [merchantId, customerPhone]
+    );
+    let customerId: number;
+    if (rows.length) {
+      customerId = rows[0].id;
+    } else {
+      const [ins]: any = await pool.query(
+        'INSERT INTO customers (merchant_id, whatsapp_id, name) VALUES (?, ?, ?)',
+        [merchantId, customerPhone, 'Unknown Customer']
+      );
+      customerId = ins.insertId;
+    }
+
+    await saveMessage(merchantId, customerId, 'outbound', displayText(echo), echo?.id || null);
+    await pauseBot(customerId);
+    console.log(`🤫 [merchant ${merchantId}] shop owner replied to ${customerPhone} — bot paused for this chat`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // 2. WHATSAPP WEBHOOK VERIFICATION (GET)
 // ─────────────────────────────────────────────────────────────
 app.get('/webhook', (req: Request, res: Response) => {
@@ -161,7 +230,35 @@ app.post('/webhook', async (req: Request, res: Response) => {
   const body = req.body;
   try {
     if (body.object !== 'whatsapp_business_account') return;
-    const changeValue = body.entry?.[0]?.changes?.[0]?.value;
+    const change = body.entry?.[0]?.changes?.[0];
+    const field: string = change?.field || '';
+    const changeValue = change?.value;
+
+    // ── EMBEDDED SIGNUP: a merchant just connected ──
+    if (field === 'account_update') {
+      if (changeValue?.event === 'PARTNER_ADDED') await handlePartnerAdded(changeValue);
+      else await handleAccountUpdateOther(changeValue);
+      return;
+    }
+
+    // ── COEXISTENCE: the shop owner replied from their own phone ──
+    if (field === 'smb_message_echoes') {
+      await handleMessageEcho(changeValue);
+      return;
+    }
+
+    // Contact + history sync. Captured but not yet processed — these
+    // only arrive in the 24 hours after a Coexistence onboarding.
+    if (field === 'history' || field === 'smb_app_state_sync') {
+      console.log(`📚 ${field} received — logged, not yet processed`);
+      try {
+        await pool.query(
+          'INSERT INTO onboarding_events (event, status, raw_json) VALUES (?, ?, ?)',
+          [field, 'logged', JSON.stringify(changeValue).slice(0, 60000)]
+        );
+      } catch { /* non-critical */ }
+      return;
+    }
 
     // ── DELIVERY STATUS CALLBACKS ──
     // Meta reports sent / delivered / read / failed here. A failed
@@ -652,6 +749,12 @@ app.post('/api/chat/send', async (req: AuthedRequest, res: Response) => {
 server.listen(PORT, async () => {
   console.log(`🚀 Server + Socket.IO running on port ${PORT}`);
   if (!APP_SECRET) console.warn('⚠️  META_APP_SECRET not set — webhook signature checks are OFF (fine for local dev).');
+  const onboardingGaps = onboardingConfigProblems();
+  if (onboardingGaps.length) {
+    console.warn(`⚠️  Embedded Signup not ready — missing ${onboardingGaps.join(', ')}. Merchants who sign up will not be connected.`);
+  } else {
+    console.log('🚪 Embedded Signup ready — waiting for PARTNER_ADDED');
+  }
   if (process.env.DISABLE_AUTH === 'true') console.warn('⚠️  DISABLE_AUTH=true — never use in production.');
   await testDbConnection();
 });

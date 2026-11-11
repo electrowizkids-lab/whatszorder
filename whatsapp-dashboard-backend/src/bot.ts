@@ -11,6 +11,39 @@ import { createCheckoutForMerchant } from './stripe';
 
 const GREETING = /^(hi|hii+|hello|hey|namaste|namaskar|menu|order|start|catalog|catalogue)\b/i;
 
+// ── Coexistence: sharing a number with a human ──────────────
+// The shop owner keeps answering from the WhatsApp Business app on
+// their phone. When they do, Meta echoes it to us and we park the
+// bot for that conversation so it doesn't talk over its own merchant.
+// Comparison uses MySQL's clock (NOW()), not Node's — the same fix
+// that cured the "code expired instantly" OTP bug.
+const PAUSE_MINUTES = Number(process.env.BOT_PAUSE_MINUTES || 60);
+
+export async function pauseBot(customerId: number, minutes = PAUSE_MINUTES) {
+  await pool.query(
+    `INSERT INTO conversation_state (customer_id, state, bot_paused_until)
+     VALUES (?, 'IDLE', DATE_ADD(NOW(), INTERVAL ? MINUTE))
+     ON DUPLICATE KEY UPDATE bot_paused_until = DATE_ADD(NOW(), INTERVAL ? MINUTE)`,
+    [customerId, minutes, minutes]
+  );
+}
+
+export async function isBotPaused(customerId: number): Promise<boolean> {
+  const [rows]: any = await pool.query(
+    `SELECT (bot_paused_until IS NOT NULL AND bot_paused_until > NOW()) AS paused
+     FROM conversation_state WHERE customer_id = ?`,
+    [customerId]
+  );
+  return rows.length ? Boolean(Number(rows[0].paused)) : false;
+}
+
+async function clearPause(customerId: number) {
+  await pool.query(
+    'UPDATE conversation_state SET bot_paused_until = NULL WHERE customer_id = ?',
+    [customerId]
+  );
+}
+
 type CartItem = { product_id: number; name: string; unit: string; price: number; qty: number };
 type BotState = {
   cart: CartItem[];
@@ -345,6 +378,21 @@ async function createOrder(ctx: BotContext, data: BotState) {
 export async function handleIncomingMessage(ctx: BotContext): Promise<boolean> {
   const { message } = ctx;
   const { state, data } = await getState(ctx.customerId);
+
+  // 0) Is the shop owner handling this conversation themselves?
+  // If so the bot stays silent — EXCEPT when the customer explicitly
+  // asks for it ("menu"), or is already mid-flow tapping its buttons.
+  // Returning true means "handled", which also stops server.ts from
+  // sending its fallback hint. Silence has to be total to be useful.
+  if (await isBotPaused(ctx.customerId)) {
+    const wakeWord = message.type === 'text' && GREETING.test((message.text?.body || '').trim());
+    const midFlow  = message.type === 'interactive';
+    if (!wakeWord && !midFlow) {
+      console.log(`🤫 Bot paused for customer ${ctx.customerId} — shop owner is replying`);
+      return true;
+    }
+    if (wakeWord) await clearPause(ctx.customerId);
+  }
 
   // 1) Interactive replies (list picks and button taps)
   if (message.type === 'interactive') {
