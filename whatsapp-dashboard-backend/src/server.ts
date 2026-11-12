@@ -327,6 +327,26 @@ app.post('/webhook', async (req: Request, res: Response) => {
     const isNew = await saveMessage(merchantId, customerId, 'inbound', inboundText, whatsappMsgId);
     if (!isNew) return;
 
+    // Two cases where the bot must say nothing at all. The message is
+    // already saved above, so the merchant still sees it on the dashboard.
+    //  1. The sender is itself a number connected to Yanvio (for example our
+    //     own login code arriving on a merchant's number). Two bots answering
+    //     each other would loop forever.
+    //  2. The merchant has no products yet. A shop that connected five minutes
+    //     ago must not have a bot greeting its real customers with an empty menu.
+    const [ownNumbers]: any = await pool.query('SELECT display_number FROM merchant_channels');
+    const fromOwnNumber = ownNumbers.some(
+      (r: any) => String(r.display_number || '').replace(/\D/g, '') === String(customerPhone)
+    );
+    const [prodCount]: any = await pool.query(
+      'SELECT COUNT(*) AS n FROM products WHERE merchant_id = ? AND active = 1', [merchantId]
+    );
+    if (fromOwnNumber || Number(prodCount[0].n) === 0) {
+      console.log(`🤐 [merchant ${merchantId}] bot silent (${fromOwnNumber ? 'sender is a Yanvio number' : 'no products yet'})`);
+      return;
+    }
+    if (!isNew) return;
+
     // ── THE BOT TAKES A LOOK ──
     const handled = await handleIncomingMessage({
       channel, merchantId, customerId, customerPhone, customerName, message,
@@ -753,7 +773,7 @@ server.listen(PORT, async () => {
   if (onboardingGaps.length) {
     console.warn(`⚠️  Embedded Signup not ready — missing ${onboardingGaps.join(', ')}. Merchants who sign up will not be connected.`);
   } else {
-    console.log('🚪 Embedded Signup ready — waiting for PARTNER_ADDED');
+    console.log('🚪 Embedded Signup ready (v2) — waiting for PARTNER_APP_INSTALLED');
   }
   if (process.env.DISABLE_AUTH === 'true') console.warn('⚠️  DISABLE_AUTH=true — never use in production.');
   await testDbConnection();
